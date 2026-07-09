@@ -2022,6 +2022,111 @@ static void virt_cpu_post_init(VirtMachineState *vms, MemoryRegion *sysmem)
     }
 }
 
+static bool virt_kernel_data_split_enabled(VirtMachineState *vms)
+{
+    return vms->kernel_data_start || vms->kernel_data_size ||
+           vms->kernel_data_memdev;
+}
+
+static void virt_map_kernel_data_ram(VirtMachineState *vms,
+                                     MachineState *machine,
+                                     MemoryRegion *sysmem)
+{
+    const hwaddr ram_base = vms->memmap[VIRT_MEM].base;
+    const uint64_t ram_size = machine->ram_size;
+    uint64_t kdata_offset, kdata_end, backend_size;
+    Object *kdata_obj;
+    HostMemoryBackend *kdata_backend;
+    MemoryRegion *kdata_mr;
+
+    if (!virt_kernel_data_split_enabled(vms)) {
+        memory_region_add_subregion(sysmem, ram_base, machine->ram);
+        return;
+    }
+
+    if (!vms->kernel_data_start || !vms->kernel_data_size ||
+        !vms->kernel_data_memdev) {
+        error_report("kernel-data-start, kernel-data-size and "
+                     "kernel-data-memdev must be specified together");
+        exit(1);
+    }
+
+    if (vms->kernel_data_uncached) {
+        error_report("kernel-data-uncached needs host/KVM support");
+        error_report("vanilla QEMU/KVM has no uncached RAM memslot flag");
+        exit(1);
+    }
+
+    if (vms->kernel_data_start < ram_base) {
+        error_report("kernel-data-start is below virt RAM base");
+        exit(1);
+    }
+
+    kdata_offset = vms->kernel_data_start - ram_base;
+    if (kdata_offset > ram_size ||
+        vms->kernel_data_size > ram_size - kdata_offset) {
+        error_report("kernel data range is outside guest RAM");
+        exit(1);
+    }
+    kdata_end = kdata_offset + vms->kernel_data_size;
+
+    if ((vms->kernel_data_start | vms->kernel_data_size) & (4 * KiB - 1)) {
+        error_report("kernel data range must be 4 KiB aligned");
+        exit(1);
+    }
+
+    kdata_obj = object_resolve_path_component(object_get_objects_root(),
+                                              vms->kernel_data_memdev);
+    if (!kdata_obj) {
+        error_report("kernel-data-memdev '%s' was not found",
+                     vms->kernel_data_memdev);
+        exit(1);
+    }
+
+    kdata_backend = MEMORY_BACKEND(object_dynamic_cast(kdata_obj,
+                                                       TYPE_MEMORY_BACKEND));
+    if (!kdata_backend) {
+        error_report("kernel-data-memdev '%s' is not a memory-backend",
+                     vms->kernel_data_memdev);
+        exit(1);
+    }
+
+    backend_size = object_property_get_uint(OBJECT(kdata_backend),
+                                            "size", &error_abort);
+    if (backend_size != vms->kernel_data_size) {
+        error_report("kernel-data-memdev size must equal kernel-data-size");
+        exit(1);
+    }
+
+    memory_region_init(&vms->kernel_data_ram_container, OBJECT(machine),
+                       "mach-virt.kernel-data-container", ram_size);
+
+    if (kdata_offset) {
+        memory_region_init_alias(&vms->kernel_data_pre_alias, OBJECT(machine),
+                                 "mach-virt.kernel-data-pre", machine->ram,
+                                 0, kdata_offset);
+        memory_region_add_subregion(&vms->kernel_data_ram_container, 0,
+                                    &vms->kernel_data_pre_alias);
+    }
+
+    kdata_mr = machine_consume_memdev(machine, kdata_backend);
+    memory_region_add_subregion(&vms->kernel_data_ram_container, kdata_offset,
+                                kdata_mr);
+
+    if (kdata_end < ram_size) {
+        memory_region_init_alias(&vms->kernel_data_post_alias, OBJECT(machine),
+                                 "mach-virt.kernel-data-post", machine->ram,
+                                 kdata_end, ram_size - kdata_end);
+        memory_region_add_subregion(&vms->kernel_data_ram_container, kdata_end,
+                                    &vms->kernel_data_post_alias);
+    }
+
+    memory_region_add_subregion(sysmem, ram_base,
+                                &vms->kernel_data_ram_container);
+    info_report("kernel data RAM split at 0x%" PRIx64 "+0x%" PRIx64,
+                vms->kernel_data_start, vms->kernel_data_size);
+}
+
 static void machvirt_init(MachineState *machine)
 {
     VirtMachineState *vms = VIRT_MACHINE(machine);
@@ -2260,8 +2365,7 @@ static void machvirt_init(MachineState *machine)
     fdt_add_timer_nodes(vms);
     fdt_add_cpu_nodes(vms);
 
-    memory_region_add_subregion(sysmem, vms->memmap[VIRT_MEM].base,
-                                machine->ram);
+    virt_map_kernel_data_ram(vms, machine, sysmem);
 
     virt_flash_fdt(vms, sysmem, secure_sysmem ?: sysmem);
 
@@ -2532,6 +2636,74 @@ static void virt_set_acpi(Object *obj, Visitor *v, const char *name,
     VirtMachineState *vms = VIRT_MACHINE(obj);
 
     visit_type_OnOffAuto(v, name, &vms->acpi, errp);
+}
+
+static void virt_get_kernel_data_start(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+    uint64_t value = vms->kernel_data_start;
+
+    visit_type_size(v, name, &value, errp);
+}
+
+static void virt_set_kernel_data_start(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    visit_type_size(v, name, &vms->kernel_data_start, errp);
+}
+
+static void virt_get_kernel_data_size(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+    uint64_t value = vms->kernel_data_size;
+
+    visit_type_size(v, name, &value, errp);
+}
+
+static void virt_set_kernel_data_size(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    visit_type_size(v, name, &vms->kernel_data_size, errp);
+}
+
+static char *virt_get_kernel_data_memdev(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return g_strdup(vms->kernel_data_memdev);
+}
+
+static void virt_set_kernel_data_memdev(Object *obj, const char *value,
+                                        Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    g_free(vms->kernel_data_memdev);
+    vms->kernel_data_memdev = g_strdup(value);
+}
+
+static bool virt_get_kernel_data_uncached(Object *obj, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    return vms->kernel_data_uncached;
+}
+
+static void virt_set_kernel_data_uncached(Object *obj, bool value, Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+
+    vms->kernel_data_uncached = value;
 }
 
 static bool virt_get_ras(Object *obj, Error **errp)
@@ -3032,6 +3204,31 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
     object_class_property_set_description(oc, "highmem-mmio",
                                           "Set on/off to enable/disable high "
                                           "memory region for PCI MMIO");
+
+    object_class_property_add(oc, "kernel-data-start", "size",
+                              virt_get_kernel_data_start,
+                              virt_set_kernel_data_start, NULL, NULL);
+    object_class_property_set_description(oc, "kernel-data-start",
+                                          "Guest physical start address of "
+                                          "kernel data RAM split");
+
+    object_class_property_add(oc, "kernel-data-size", "size",
+                              virt_get_kernel_data_size,
+                              virt_set_kernel_data_size, NULL, NULL);
+    object_class_property_set_description(oc, "kernel-data-size",
+                                          "Size of kernel data RAM split");
+
+    object_class_property_add_str(oc, "kernel-data-memdev",
+                                  virt_get_kernel_data_memdev,
+                                  virt_set_kernel_data_memdev);
+    object_class_property_set_description(oc, "kernel-data-memdev",
+                                          "Memory backend for kernel data");
+
+    object_class_property_add_bool(oc, "kernel-data-uncached",
+                                   virt_get_kernel_data_uncached,
+                                   virt_set_kernel_data_uncached);
+    object_class_property_set_description(oc, "kernel-data-uncached",
+                                          "Request uncached kernel data RAM");
 
     object_class_property_add_str(oc, "gic-version", virt_get_gic_version,
                                   virt_set_gic_version);

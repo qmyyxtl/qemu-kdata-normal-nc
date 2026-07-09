@@ -36,6 +36,7 @@
 #include "hw/arm/boot.h"
 #include "hw/arm/bsa.h"
 #include "hw/block/flash.h"
+#include "sysemu/hostmem.h"
 #include "sysemu/kvm.h"
 #include "hw/intc/arm_gicv3_common.h"
 #include "qom/object.h"
@@ -173,6 +174,13 @@ struct VirtMachineState {
     PCIBus *bus;
     char *oem_id;
     char *oem_table_id;
+    uint64_t kernel_data_start;
+    uint64_t kernel_data_size;
+    bool kernel_data_uncached;
+    char *kernel_data_memdev;
+    MemoryRegion kernel_data_ram_container;
+    MemoryRegion kernel_data_pre_alias;
+    MemoryRegion kernel_data_post_alias;
 };
 
 #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
