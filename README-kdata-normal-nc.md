@@ -93,6 +93,18 @@ This boots the disk through EDK2 and GRUB with `-bios`:
 -bios /usr/share/edk2/aarch64/QEMU_EFI.fd
 ```
 
+The UEFI launcher uses explicit RAM backends for both regions:
+
+```bash
+-object memory-backend-ram,id=guestram,size=4G
+-object memory-backend-ram,id=kdata,size=0x550000
+-machine virt,memory-backend=guestram,\
+kernel-data-start=0x41ee0000,\
+kernel-data-size=0x550000,\
+kernel-data-memdev=kdata,\
+kernel-data-uncached=on
+```
+
 For UEFI boot, QEMU does not load the guest kernel image itself, so the kernel data GPA range is not discoverable from `-kernel`. The UEFI launcher therefore computes the range from `System.map` when available:
 
 ```bash

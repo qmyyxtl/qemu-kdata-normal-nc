@@ -15,6 +15,7 @@ SMP=${SMP:-4}
 MEM=${MEM:-4G}
 RAM_BASE=${RAM_BASE:-0x40000000}
 KDATA_ALIGN=${KDATA_ALIGN:-0x10000}
+MAIN_RAM_MEMDEV=${MAIN_RAM_MEMDEV:-guestram}
 KDATA_MEMDEV=${KDATA_MEMDEV:-kdata}
 KERNEL_DATA_UNCACHED=${KERNEL_DATA_UNCACHED:-on}
 
@@ -78,13 +79,15 @@ PY
 fi
 
 echo "UEFI kernel data range: ${KDATA_START}+${KDATA_SIZE} uncached=${KERNEL_DATA_UNCACHED}" >&2
+echo "UEFI RAM backends: main=${MAIN_RAM_MEMDEV}:${MEM} kdata=${KDATA_MEMDEV}:${KDATA_SIZE}" >&2
 
 exec sudo "$QEMU_BIN" \
     -nographic \
     -cpu host \
-    -machine "virt,gic-version=3,its=off,kernel-data-start=${KDATA_START},kernel-data-size=${KDATA_SIZE},kernel-data-memdev=${KDATA_MEMDEV},kernel-data-uncached=${KERNEL_DATA_UNCACHED}" \
+    -machine "virt,gic-version=3,its=off,memory-backend=${MAIN_RAM_MEMDEV},kernel-data-start=${KDATA_START},kernel-data-size=${KDATA_SIZE},kernel-data-memdev=${KDATA_MEMDEV},kernel-data-uncached=${KERNEL_DATA_UNCACHED}" \
     -smp "$SMP" \
     -m "$MEM" \
+    -object "memory-backend-ram,id=${MAIN_RAM_MEMDEV},size=${MEM}" \
     -object "memory-backend-ram,id=${KDATA_MEMDEV},size=${KDATA_SIZE}" \
     -enable-kvm \
     -bios "$FIRMWARE" \
