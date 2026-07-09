@@ -2375,6 +2375,21 @@ void memory_region_set_readonly(MemoryRegion *mr, bool readonly)
     }
 }
 
+void memory_region_set_uncached(MemoryRegion *mr, bool uncached)
+{
+    if (mr->uncached != uncached) {
+        memory_region_transaction_begin();
+        mr->uncached = uncached;
+        memory_region_update_pending |= mr->enabled;
+        memory_region_transaction_commit();
+    }
+}
+
+bool memory_region_is_uncached(MemoryRegion *mr)
+{
+    return mr->uncached;
+}
+
 void memory_region_set_nonvolatile(MemoryRegion *mr, bool nonvolatile)
 {
     if (mr->nonvolatile != nonvolatile) {

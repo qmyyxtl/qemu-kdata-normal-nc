@@ -2051,12 +2051,6 @@ static void virt_map_kernel_data_ram(VirtMachineState *vms,
         exit(1);
     }
 
-    if (vms->kernel_data_uncached) {
-        error_report("kernel-data-uncached needs host/KVM support");
-        error_report("vanilla QEMU/KVM has no uncached RAM memslot flag");
-        exit(1);
-    }
-
     if (vms->kernel_data_start < ram_base) {
         error_report("kernel-data-start is below virt RAM base");
         exit(1);
@@ -2110,6 +2104,9 @@ static void virt_map_kernel_data_ram(VirtMachineState *vms,
     }
 
     kdata_mr = machine_consume_memdev(machine, kdata_backend);
+    if (vms->kernel_data_uncached) {
+        memory_region_set_uncached(kdata_mr, true);
+    }
     memory_region_add_subregion(&vms->kernel_data_ram_container, kdata_offset,
                                 kdata_mr);
 

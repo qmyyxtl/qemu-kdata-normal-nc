@@ -475,6 +475,9 @@ static int kvm_mem_flags(MemoryRegion *mr)
     if (readonly && kvm_readonly_mem_allowed) {
         flags |= KVM_MEM_READONLY;
     }
+    if (memory_region_is_uncached(mr)) {
+        flags |= KVM_MEM_UNCACHED;
+    }
     return flags;
 }
 

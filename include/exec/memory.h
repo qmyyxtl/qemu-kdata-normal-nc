@@ -792,6 +792,7 @@ struct MemoryRegion {
     bool ram;
     bool subpage;
     bool readonly; /* For RAM regions */
+    bool uncached; /* For experimental KVM RAM memslots */
     bool nonvolatile;
     bool rom_device;
     bool flush_coalesced_mmio;
@@ -2148,6 +2149,8 @@ void memory_region_flush_rom_device(MemoryRegion *mr, hwaddr addr, hwaddr size);
  * @readonly: whether rhe region is to be ROM or RAM.
  */
 void memory_region_set_readonly(MemoryRegion *mr, bool readonly);
+void memory_region_set_uncached(MemoryRegion *mr, bool uncached);
+bool memory_region_is_uncached(MemoryRegion *mr);
 
 /**
  * memory_region_set_nonvolatile: Turn a memory region non-volatile
