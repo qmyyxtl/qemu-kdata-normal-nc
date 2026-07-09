@@ -85,3 +85,11 @@ The minimal patches are also included for review:
 - `patches/qemu/0001-arm-virt-split-kernel-data-RAM-into-dedicated-backen.patch`
 - `patches/qemu/0002-kvm-pass-uncached-flag-for-kernel-data-memslot.patch`
 - `patches/kernel/0001-KVM-arm64-support-normal-NC-userspace-memory-slots.patch`
+
+## Patch files
+
+The minimal patches are also included for review:
+
+- `patches/qemu/0001-arm-virt-split-kernel-data-RAM-into-dedicated-backen.patch`
+- `patches/qemu/0002-kvm-pass-uncached-flag-for-kernel-data-memslot.patch`
+- `patches/kernel/0001-KVM-arm64-support-normal-NC-userspace-memory-slots.patch`

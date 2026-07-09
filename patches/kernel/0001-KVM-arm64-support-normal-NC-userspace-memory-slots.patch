@@ -1,0 +1,151 @@
+From 399e651d7f0a3b0bf75c1e5998721946cb6adc00 Mon Sep 17 00:00:00 2001
+From: qmyyxtl <qmyyxtl@sjtu.edu.cn>
+Date: Thu, 9 Jul 2026 15:34:51 +0800
+Subject: [PATCH] KVM: arm64: support normal-NC userspace memory slots
+
+---
+ arch/arm64/include/asm/kvm_pgtable.h |  2 ++
+ arch/arm64/include/asm/memory.h      |  1 +
+ arch/arm64/kvm/hyp/pgtable.c         | 16 ++++++++++++++--
+ arch/arm64/kvm/mmu.c                 | 16 +++++++++++-----
+ include/uapi/linux/kvm.h             |  1 +
+ virt/kvm/kvm_main.c                  |  3 ++-
+ 6 files changed, 31 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 0c0ae56e8..9ed0e2919 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -178,6 +178,7 @@ enum kvm_pgtable_stage2_flags {
+  * @KVM_PGTABLE_PROT_W:		Write permission.
+  * @KVM_PGTABLE_PROT_R:		Read permission.
+  * @KVM_PGTABLE_PROT_DEVICE:	Device attributes.
++ * @KVM_PGTABLE_PROT_NORMAL_NC:	Normal non-cacheable attributes.
+  * @KVM_PGTABLE_PROT_SW0:	Software bit 0.
+  * @KVM_PGTABLE_PROT_SW1:	Software bit 1.
+  * @KVM_PGTABLE_PROT_SW2:	Software bit 2.
+@@ -190,6 +191,7 @@ enum kvm_pgtable_prot {
+ 
+ 	KVM_PGTABLE_PROT_DEVICE			= BIT(3),
+ 	KVM_PGTABLE_PROT_DBM			= BIT(4),
++	KVM_PGTABLE_PROT_NORMAL_NC		= BIT(5),
+ 
+ 	KVM_PGTABLE_PROT_SW0			= BIT(55),
+ 	KVM_PGTABLE_PROT_SW1			= BIT(56),
+diff --git a/arch/arm64/include/asm/memory.h b/arch/arm64/include/asm/memory.h
+index fde4186cc..bf4546520 100644
+--- a/arch/arm64/include/asm/memory.h
++++ b/arch/arm64/include/asm/memory.h
+@@ -147,6 +147,7 @@
+  * Memory types for Stage-2 translation
+  */
+ #define MT_S2_NORMAL		0xf
++#define MT_S2_NORMAL_NC		0x5
+ #define MT_S2_DEVICE_nGnRE	0x1
+ 
+ /*
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 874244df7..e40c594b5 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -698,8 +698,20 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 				kvm_pte_t *ptep)
+ {
+ 	bool device = prot & KVM_PGTABLE_PROT_DEVICE;
+-	kvm_pte_t attr = device ? KVM_S2_MEMATTR(pgt, DEVICE_nGnRE) :
+-			    KVM_S2_MEMATTR(pgt, NORMAL);
++	bool normal_nc = prot & KVM_PGTABLE_PROT_NORMAL_NC;
++	kvm_pte_t attr;
++
++	if (device && normal_nc)
++		return -EINVAL;
++	if (normal_nc && stage2_has_fwb(pgt))
++		return -EINVAL;
++
++	if (device)
++		attr = KVM_S2_MEMATTR(pgt, DEVICE_nGnRE);
++	else if (normal_nc)
++		attr = PTE_S2_MEMATTR(MT_S2_NORMAL_NC);
++	else
++		attr = KVM_S2_MEMATTR(pgt, NORMAL);
+ 	u32 sh = KVM_PTE_LEAF_ATTR_LO_S2_SH_IS;
+ 
+ 	if (!(prot & KVM_PGTABLE_PROT_X))
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index cd7589d05..868c95c5c 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1467,7 +1467,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	int ret = 0;
+ 	bool write_fault, writable, force_pte = false;
+ 	bool exec_fault, mte_allowed;
+-	bool device = false;
++	bool device = false, normal_nc = false;
+ 	unsigned long mmu_seq;
+ 	struct kvm *kvm = vcpu->kvm;
+ 	struct kvm_mmu_memory_cache *memcache = &vcpu->arch.mmu_page_cache;
+@@ -1597,7 +1597,9 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (is_error_noslot_pfn(pfn))
+ 		return -EFAULT;
+ 
+-	if (kvm_is_device_pfn(pfn)) {
++	if (memslot->flags & KVM_MEM_UNCACHED) {
++		normal_nc = true;
++	} else if (kvm_is_device_pfn(pfn)) {
+ 		/*
+ 		 * If the page was identified as device early by looking at
+ 		 * the VMA flags, vma_pagesize is already representing the
+@@ -1675,10 +1677,14 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (exec_fault)
+ 		prot |= KVM_PGTABLE_PROT_X;
+ 
+-	if (device)
++	if (device) {
+ 		prot |= KVM_PGTABLE_PROT_DEVICE;
+-	else if (cpus_have_const_cap(ARM64_HAS_CACHE_DIC))
+-		prot |= KVM_PGTABLE_PROT_X;
++	} else {
++		if (normal_nc)
++			prot |= KVM_PGTABLE_PROT_NORMAL_NC;
++		if (cpus_have_const_cap(ARM64_HAS_CACHE_DIC))
++			prot |= KVM_PGTABLE_PROT_X;
++	}
+ 
+ 	/*
+ 	 * Under the premise of getting a FSC_PERM fault, we just need to relax
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 0036cfaf5..895ac4a48 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -102,6 +102,7 @@ struct kvm_userspace_memory_region {
+  */
+ #define KVM_MEM_LOG_DIRTY_PAGES	(1UL << 0)
+ #define KVM_MEM_READONLY	(1UL << 1)
++#define KVM_MEM_UNCACHED	(1UL << 2)
+ #define KVM_MEM_HUGE_POD	(1UL << 9)
+ 
+ /* for KVM_IRQ_LINE */
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index d8cb9c60d..b1e31822c 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -1620,6 +1620,7 @@ static int check_memory_region_flags(const struct kvm_userspace_memory_region *m
+ #ifdef __KVM_HAVE_READONLY_MEM
+ 	valid_flags |= KVM_MEM_READONLY;
+ #endif
++	valid_flags |= KVM_MEM_UNCACHED;
+ 	valid_flags |= KVM_MEM_HUGE_POD;
+ 
+ 	if (mem->flags & ~valid_flags)
+@@ -2085,7 +2086,7 @@ int __kvm_set_memory_region(struct kvm *kvm,
+ 	} else { /* Modify an existing slot. */
+ 		if ((mem->userspace_addr != old->userspace_addr) ||
+ 		    (npages != old->npages) ||
+-		    ((mem->flags ^ old->flags) & KVM_MEM_READONLY))
++		    ((mem->flags ^ old->flags) & (KVM_MEM_READONLY | KVM_MEM_UNCACHED)))
+ 			return -EINVAL;
+ 
+ 		if (base_gfn != old->base_gfn)
+-- 
+2.43.0
+

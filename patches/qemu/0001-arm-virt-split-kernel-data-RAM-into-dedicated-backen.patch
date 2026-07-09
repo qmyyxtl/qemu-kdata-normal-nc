@@ -1,0 +1,275 @@
+From 39507b1ebf38214695f1a5f26dd99d73da416206 Mon Sep 17 00:00:00 2001
+From: qmyyxtl <qmyyxtl@sjtu.edu.cn>
+Date: Thu, 9 Jul 2026 13:00:08 +0800
+Subject: [PATCH 1/2] arm/virt: split kernel data RAM into dedicated backend
+
+Add virt machine properties to map a guest physical kernel data range from a separate memory-backend while keeping the rest of RAM backed by the normal backend via aliases. This lets a 4U4G nokaslr guest place Kernel data at 0x427b0000-0x42c8ffff using a kdata backend.
+
+kernel-data-uncached is parsed as an experiment knob but rejected on vanilla QEMU/KVM because KVM memslots do not expose an uncached RAM attribute.
+---
+ hw/arm/virt.c         | 201 +++++++++++++++++++++++++++++++++++++++++-
+ include/hw/arm/virt.h |   8 ++
+ 2 files changed, 207 insertions(+), 2 deletions(-)
+
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index be2856c..bc37490 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -2022,6 +2022,111 @@ static void virt_cpu_post_init(VirtMachineState *vms, MemoryRegion *sysmem)
+     }
+ }
+ 
++static bool virt_kernel_data_split_enabled(VirtMachineState *vms)
++{
++    return vms->kernel_data_start || vms->kernel_data_size ||
++           vms->kernel_data_memdev;
++}
++
++static void virt_map_kernel_data_ram(VirtMachineState *vms,
++                                     MachineState *machine,
++                                     MemoryRegion *sysmem)
++{
++    const hwaddr ram_base = vms->memmap[VIRT_MEM].base;
++    const uint64_t ram_size = machine->ram_size;
++    uint64_t kdata_offset, kdata_end, backend_size;
++    Object *kdata_obj;
++    HostMemoryBackend *kdata_backend;
++    MemoryRegion *kdata_mr;
++
++    if (!virt_kernel_data_split_enabled(vms)) {
++        memory_region_add_subregion(sysmem, ram_base, machine->ram);
++        return;
++    }
++
++    if (!vms->kernel_data_start || !vms->kernel_data_size ||
++        !vms->kernel_data_memdev) {
++        error_report("kernel-data-start, kernel-data-size and "
++                     "kernel-data-memdev must be specified together");
++        exit(1);
++    }
++
++    if (vms->kernel_data_uncached) {
++        error_report("kernel-data-uncached needs host/KVM support");
++        error_report("vanilla QEMU/KVM has no uncached RAM memslot flag");
++        exit(1);
++    }
++
++    if (vms->kernel_data_start < ram_base) {
++        error_report("kernel-data-start is below virt RAM base");
++        exit(1);
++    }
++
++    kdata_offset = vms->kernel_data_start - ram_base;
++    if (kdata_offset > ram_size ||
++        vms->kernel_data_size > ram_size - kdata_offset) {
++        error_report("kernel data range is outside guest RAM");
++        exit(1);
++    }
++    kdata_end = kdata_offset + vms->kernel_data_size;
++
++    if ((vms->kernel_data_start | vms->kernel_data_size) & (4 * KiB - 1)) {
++        error_report("kernel data range must be 4 KiB aligned");
++        exit(1);
++    }
++
++    kdata_obj = object_resolve_path_component(object_get_objects_root(),
++                                              vms->kernel_data_memdev);
++    if (!kdata_obj) {
++        error_report("kernel-data-memdev '%s' was not found",
++                     vms->kernel_data_memdev);
++        exit(1);
++    }
++
++    kdata_backend = MEMORY_BACKEND(object_dynamic_cast(kdata_obj,
++                                                       TYPE_MEMORY_BACKEND));
++    if (!kdata_backend) {
++        error_report("kernel-data-memdev '%s' is not a memory-backend",
++                     vms->kernel_data_memdev);
++        exit(1);
++    }
++
++    backend_size = object_property_get_uint(OBJECT(kdata_backend),
++                                            "size", &error_abort);
++    if (backend_size != vms->kernel_data_size) {
++        error_report("kernel-data-memdev size must equal kernel-data-size");
++        exit(1);
++    }
++
++    memory_region_init(&vms->kernel_data_ram_container, OBJECT(machine),
++                       "mach-virt.kernel-data-container", ram_size);
++
++    if (kdata_offset) {
++        memory_region_init_alias(&vms->kernel_data_pre_alias, OBJECT(machine),
++                                 "mach-virt.kernel-data-pre", machine->ram,
++                                 0, kdata_offset);
++        memory_region_add_subregion(&vms->kernel_data_ram_container, 0,
++                                    &vms->kernel_data_pre_alias);
++    }
++
++    kdata_mr = machine_consume_memdev(machine, kdata_backend);
++    memory_region_add_subregion(&vms->kernel_data_ram_container, kdata_offset,
++                                kdata_mr);
++
++    if (kdata_end < ram_size) {
++        memory_region_init_alias(&vms->kernel_data_post_alias, OBJECT(machine),
++                                 "mach-virt.kernel-data-post", machine->ram,
++                                 kdata_end, ram_size - kdata_end);
++        memory_region_add_subregion(&vms->kernel_data_ram_container, kdata_end,
++                                    &vms->kernel_data_post_alias);
++    }
++
++    memory_region_add_subregion(sysmem, ram_base,
++                                &vms->kernel_data_ram_container);
++    info_report("kernel data RAM split at 0x%" PRIx64 "+0x%" PRIx64,
++                vms->kernel_data_start, vms->kernel_data_size);
++}
++
+ static void machvirt_init(MachineState *machine)
+ {
+     VirtMachineState *vms = VIRT_MACHINE(machine);
+@@ -2260,8 +2365,7 @@ static void machvirt_init(MachineState *machine)
+     fdt_add_timer_nodes(vms);
+     fdt_add_cpu_nodes(vms);
+ 
+-    memory_region_add_subregion(sysmem, vms->memmap[VIRT_MEM].base,
+-                                machine->ram);
++    virt_map_kernel_data_ram(vms, machine, sysmem);
+ 
+     virt_flash_fdt(vms, sysmem, secure_sysmem ?: sysmem);
+ 
+@@ -2534,6 +2638,74 @@ static void virt_set_acpi(Object *obj, Visitor *v, const char *name,
+     visit_type_OnOffAuto(v, name, &vms->acpi, errp);
+ }
+ 
++static void virt_get_kernel_data_start(Object *obj, Visitor *v,
++                                       const char *name, void *opaque,
++                                       Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++    uint64_t value = vms->kernel_data_start;
++
++    visit_type_size(v, name, &value, errp);
++}
++
++static void virt_set_kernel_data_start(Object *obj, Visitor *v,
++                                       const char *name, void *opaque,
++                                       Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    visit_type_size(v, name, &vms->kernel_data_start, errp);
++}
++
++static void virt_get_kernel_data_size(Object *obj, Visitor *v,
++                                      const char *name, void *opaque,
++                                      Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++    uint64_t value = vms->kernel_data_size;
++
++    visit_type_size(v, name, &value, errp);
++}
++
++static void virt_set_kernel_data_size(Object *obj, Visitor *v,
++                                      const char *name, void *opaque,
++                                      Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    visit_type_size(v, name, &vms->kernel_data_size, errp);
++}
++
++static char *virt_get_kernel_data_memdev(Object *obj, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    return g_strdup(vms->kernel_data_memdev);
++}
++
++static void virt_set_kernel_data_memdev(Object *obj, const char *value,
++                                        Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    g_free(vms->kernel_data_memdev);
++    vms->kernel_data_memdev = g_strdup(value);
++}
++
++static bool virt_get_kernel_data_uncached(Object *obj, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    return vms->kernel_data_uncached;
++}
++
++static void virt_set_kernel_data_uncached(Object *obj, bool value, Error **errp)
++{
++    VirtMachineState *vms = VIRT_MACHINE(obj);
++
++    vms->kernel_data_uncached = value;
++}
++
+ static bool virt_get_ras(Object *obj, Error **errp)
+ {
+     VirtMachineState *vms = VIRT_MACHINE(obj);
+@@ -3033,6 +3205,31 @@ static void virt_machine_class_init(ObjectClass *oc, void *data)
+                                           "Set on/off to enable/disable high "
+                                           "memory region for PCI MMIO");
+ 
++    object_class_property_add(oc, "kernel-data-start", "size",
++                              virt_get_kernel_data_start,
++                              virt_set_kernel_data_start, NULL, NULL);
++    object_class_property_set_description(oc, "kernel-data-start",
++                                          "Guest physical start address of "
++                                          "kernel data RAM split");
++
++    object_class_property_add(oc, "kernel-data-size", "size",
++                              virt_get_kernel_data_size,
++                              virt_set_kernel_data_size, NULL, NULL);
++    object_class_property_set_description(oc, "kernel-data-size",
++                                          "Size of kernel data RAM split");
++
++    object_class_property_add_str(oc, "kernel-data-memdev",
++                                  virt_get_kernel_data_memdev,
++                                  virt_set_kernel_data_memdev);
++    object_class_property_set_description(oc, "kernel-data-memdev",
++                                          "Memory backend for kernel data");
++
++    object_class_property_add_bool(oc, "kernel-data-uncached",
++                                   virt_get_kernel_data_uncached,
++                                   virt_set_kernel_data_uncached);
++    object_class_property_set_description(oc, "kernel-data-uncached",
++                                          "Request uncached kernel data RAM");
++
+     object_class_property_add_str(oc, "gic-version", virt_get_gic_version,
+                                   virt_set_gic_version);
+     object_class_property_set_description(oc, "gic-version",
+diff --git a/include/hw/arm/virt.h b/include/hw/arm/virt.h
+index f692398..69d232e 100644
+--- a/include/hw/arm/virt.h
++++ b/include/hw/arm/virt.h
+@@ -36,6 +36,7 @@
+ #include "hw/arm/boot.h"
+ #include "hw/arm/bsa.h"
+ #include "hw/block/flash.h"
++#include "sysemu/hostmem.h"
+ #include "sysemu/kvm.h"
+ #include "hw/intc/arm_gicv3_common.h"
+ #include "qom/object.h"
+@@ -173,6 +174,13 @@ struct VirtMachineState {
+     PCIBus *bus;
+     char *oem_id;
+     char *oem_table_id;
++    uint64_t kernel_data_start;
++    uint64_t kernel_data_size;
++    bool kernel_data_uncached;
++    char *kernel_data_memdev;
++    MemoryRegion kernel_data_ram_container;
++    MemoryRegion kernel_data_pre_alias;
++    MemoryRegion kernel_data_post_alias;
+ };
+ 
+ #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
+-- 
+2.43.0
+

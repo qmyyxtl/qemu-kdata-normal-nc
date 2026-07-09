@@ -1,0 +1,117 @@
+From 448d3d4185fec5a21ee8808b0a811caa0f80f24d Mon Sep 17 00:00:00 2001
+From: qmyyxtl <qmyyxtl@sjtu.edu.cn>
+Date: Thu, 9 Jul 2026 13:05:51 +0800
+Subject: [PATCH 2/2] kvm: pass uncached flag for kernel data memslot
+
+Wire the virt machine kernel-data-uncached option to a MemoryRegion flag and pass KVM_MEM_UNCACHED when registering that RAM memslot. This pairs with the experimental arm64 KVM host patch that maps such memslots with uncached stage-2 attributes.
+---
+ accel/kvm/kvm-all.c       |  3 +++
+ hw/arm/virt.c             |  9 +++------
+ include/exec/memory.h     |  3 +++
+ linux-headers/linux/kvm.h |  1 +
+ system/memory.c           | 15 +++++++++++++++
+ 5 files changed, 25 insertions(+), 6 deletions(-)
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index e39a810..16bd590 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -475,6 +475,9 @@ static int kvm_mem_flags(MemoryRegion *mr)
+     if (readonly && kvm_readonly_mem_allowed) {
+         flags |= KVM_MEM_READONLY;
+     }
++    if (memory_region_is_uncached(mr)) {
++        flags |= KVM_MEM_UNCACHED;
++    }
+     return flags;
+ }
+ 
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index bc37490..c88c113 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -2051,12 +2051,6 @@ static void virt_map_kernel_data_ram(VirtMachineState *vms,
+         exit(1);
+     }
+ 
+-    if (vms->kernel_data_uncached) {
+-        error_report("kernel-data-uncached needs host/KVM support");
+-        error_report("vanilla QEMU/KVM has no uncached RAM memslot flag");
+-        exit(1);
+-    }
+-
+     if (vms->kernel_data_start < ram_base) {
+         error_report("kernel-data-start is below virt RAM base");
+         exit(1);
+@@ -2110,6 +2104,9 @@ static void virt_map_kernel_data_ram(VirtMachineState *vms,
+     }
+ 
+     kdata_mr = machine_consume_memdev(machine, kdata_backend);
++    if (vms->kernel_data_uncached) {
++        memory_region_set_uncached(kdata_mr, true);
++    }
+     memory_region_add_subregion(&vms->kernel_data_ram_container, kdata_offset,
+                                 kdata_mr);
+ 
+diff --git a/include/exec/memory.h b/include/exec/memory.h
+index 831f7c9..362fac3 100644
+--- a/include/exec/memory.h
++++ b/include/exec/memory.h
+@@ -792,6 +792,7 @@ struct MemoryRegion {
+     bool ram;
+     bool subpage;
+     bool readonly; /* For RAM regions */
++    bool uncached; /* For experimental KVM RAM memslots */
+     bool nonvolatile;
+     bool rom_device;
+     bool flush_coalesced_mmio;
+@@ -2148,6 +2149,8 @@ void memory_region_flush_rom_device(MemoryRegion *mr, hwaddr addr, hwaddr size);
+  * @readonly: whether rhe region is to be ROM or RAM.
+  */
+ void memory_region_set_readonly(MemoryRegion *mr, bool readonly);
++void memory_region_set_uncached(MemoryRegion *mr, bool uncached);
++bool memory_region_is_uncached(MemoryRegion *mr);
+ 
+ /**
+  * memory_region_set_nonvolatile: Turn a memory region non-volatile
+diff --git a/linux-headers/linux/kvm.h b/linux-headers/linux/kvm.h
+index 0d74ee9..5607b5e 100644
+--- a/linux-headers/linux/kvm.h
++++ b/linux-headers/linux/kvm.h
+@@ -102,6 +102,7 @@ struct kvm_userspace_memory_region {
+  */
+ #define KVM_MEM_LOG_DIRTY_PAGES	(1UL << 0)
+ #define KVM_MEM_READONLY	(1UL << 1)
++#define KVM_MEM_UNCACHED	(1UL << 2)
+ 
+ /* for KVM_IRQ_LINE */
+ struct kvm_irq_level {
+diff --git a/system/memory.c b/system/memory.c
+index 798b6c0..ec60766 100644
+--- a/system/memory.c
++++ b/system/memory.c
+@@ -2375,6 +2375,21 @@ void memory_region_set_readonly(MemoryRegion *mr, bool readonly)
+     }
+ }
+ 
++void memory_region_set_uncached(MemoryRegion *mr, bool uncached)
++{
++    if (mr->uncached != uncached) {
++        memory_region_transaction_begin();
++        mr->uncached = uncached;
++        memory_region_update_pending |= mr->enabled;
++        memory_region_transaction_commit();
++    }
++}
++
++bool memory_region_is_uncached(MemoryRegion *mr)
++{
++    return mr->uncached;
++}
++
+ void memory_region_set_nonvolatile(MemoryRegion *mr, bool nonvolatile)
+ {
+     if (mr->nonvolatile != nonvolatile) {
+-- 
+2.43.0
+
