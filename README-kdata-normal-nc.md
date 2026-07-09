@@ -60,10 +60,11 @@ With the matching arm64 KVM Normal-NC kernel, the guest boots successfully to lo
 
 ## Launcher script
 
-A launcher matching the tested setup is provided at:
+Launchers matching the tested setups are provided at:
 
 ```bash
 scripts/run-kdata-normal-nc.sh
+scripts/run-kdata-normal-nc-uefi.sh
 ```
 
 Common overrides:
@@ -78,13 +79,48 @@ scripts/run-kdata-normal-nc.sh
 
 Set `KERNEL_DATA_UNCACHED=off` to keep the same split memory layout without requesting the uncached KVM memslot flag.
 
-## Patch files
+## UEFI boot
 
-The minimal patches are also included for review:
+The UEFI path was tested with openEuler 24.03 LTS-SP2 using:
 
-- `patches/qemu/0001-arm-virt-split-kernel-data-RAM-into-dedicated-backen.patch`
-- `patches/qemu/0002-kvm-pass-uncached-flag-for-kernel-data-memslot.patch`
-- `patches/kernel/0001-KVM-arm64-support-normal-NC-userspace-memory-slots.patch`
+```bash
+scripts/run-kdata-normal-nc-uefi.sh
+```
+
+This boots the disk through EDK2 and GRUB with `-bios`:
+
+```bash
+-bios /usr/share/edk2/aarch64/QEMU_EFI.fd
+```
+
+For UEFI boot, QEMU does not load the guest kernel image itself, so the kernel data GPA range is not discoverable from `-kernel`. The UEFI launcher therefore computes the range from `System.map` when available:
+
+```bash
+SYSTEM_MAP=/mnt/openeuler-efi/System.map-6.6.0-125.0.0.125.oe2403sp2.aarch64 \
+scripts/run-kdata-normal-nc-uefi.sh
+```
+
+The tested openEuler kernel used:
+
+```text
+_sdata=ffff800081ee0000
+_edata=ffff800082428200
+```
+
+With RAM base `0x40000000`, the tested split was:
+
+```text
+kernel-data-start=0x41ee0000
+kernel-data-size=0x550000
+```
+
+QEMU printed:
+
+```text
+kernel data RAM split at 0x41ee0000+0x550000
+```
+
+and the guest reached `localhost login:` with `kernel-data-uncached=on`.
 
 ## Patch files
 
